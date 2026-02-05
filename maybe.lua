@@ -1,7 +1,7 @@
--- ⚡ Silent Aim - Ultra Advanced Aimbot System
--- 🎯 Features: 360° Detection, 10x Lock Power, Smart Auto TP
+-- ⚡ Silent Aim - Advanced Aimbot System V2
+-- 🎯 Features: 360° Silent Aim, Head Lock, Auto Aim, ESP, Auto Shot, Auto TP
 -- 🔫 Game: Sniper FPS Arena
--- 📱 PC & Mobile & Console Compatible
+-- 📱 PC & Mobile Compatible
 
 -- UI Framework Loading
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
@@ -14,12 +14,10 @@ local WS = game:GetService("Workspace")
 local Camera = WS.CurrentCamera
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local VirtualInputManager = game:GetService("VirtualInputManager")
+local TweenService = game:GetService("TweenService")
 
 -- Player Variables
 local LocalPlayer = Players.LocalPlayer
-local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-local HRP = Character:WaitForChild("HumanoidRootPart")
-local Humanoid = Character:WaitForChild("Humanoid")
 local Mouse = LocalPlayer:GetMouse()
 
 -- Platform Detection
@@ -34,25 +32,34 @@ local States = {
     AutoAim = false,
     ESP = false,
     AutoShot = false,
-    AutoTP = false,
-    WallCheck = true,
+    WallCheck = false, -- 360度対応のため無効化
     TargetPart = "Head",
-    FOV = 360, -- 360° detection for all directions including behind
+    FOV = 360, -- 360度に変更
     CurrentTarget = nil,
     TargetDistance = math.huge,
     Platform = IsMobile and "Mobile" or (IsConsole and "Console" or "PC"),
-    LockPower = 10, -- 10x lock power multiplier
-    ShotDelay = 0.01,
-    TPRange = 50, -- TP distance from target
-    LastKillTime = 0,
+    
+    -- Performance Settings
+    SilentAimStrength = 100,
+    HeadLockStrength = 100,
+    AutoAimStrength = 100,
+    
+    -- Auto TP Settings
+    AutoTP = false,
+    TPDistance = 10, -- 0-25 studs
+    TPMode = "Random", -- "Random" or "Fixed"
+    FixedDistance = 3, -- For Fixed mode
     CurrentTPTarget = nil,
-    TargetLastHealth = nil,
-    KillCount = 0
+    LastKilledTarget = nil,
+    
+    -- All Players Fixed Mode
+    AllPlayersFixed = false,
+    FixedDistanceAll = 3,
 }
 
 local Connections = {}
 local ESPObjects = {}
-local AllTargets = {} -- Store all potential targets
+local TPTargets = {} -- Track TP targets
 
 -- Safe Call Function
 local function SafeCall(func, ...)
@@ -74,41 +81,39 @@ local function CleanupAll()
         SafeCall(function() esp:Destroy() end)
     end
     ESPObjects = {}
+    
+    TPTargets = {}
 end
 
--- Wall Check Function (Ray Casting) - Enhanced
+-- Wall Check Function (Optional - 360度では不要)
 local function WallCheck(origin, target)
     if not States.WallCheck then return true end
     
-    SafeCall(function()
-        local raycastParams = RaycastParams.new()
-        raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
-        raycastParams.FilterDescendantsInstances = {LocalPlayer.Character}
-        raycastParams.IgnoreWater = true
-        
-        local direction = (target - origin)
-        local ray = WS:Raycast(origin, direction, raycastParams)
-        
-        if ray then
-            local hitPart = ray.Instance
-            if hitPart then
-                -- Check if hit player's character
-                local character = hitPart:FindFirstAncestorOfClass("Model")
-                if character and character:FindFirstChild("Humanoid") then
-                    return true
-                end
-                return false
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+    raycastParams.FilterDescendantsInstances = {LocalPlayer.Character}
+    raycastParams.IgnoreWater = true
+    
+    local ray = WS:Raycast(origin, (target - origin), raycastParams)
+    
+    if ray then
+        local hitPart = ray.Instance
+        if hitPart then
+            local character = hitPart:FindFirstAncestorOfClass("Model")
+            if character and character:FindFirstChild("Humanoid") then
+                return true
             end
+            return false
         end
-    end)
+    end
     
     return true
 end
 
--- Get ALL Targets (360° including behind) - Sorted by Distance
+-- Get All Valid Targets (360度、近い順)
 local function GetAllTargets()
-    AllTargets = {}
-    local myPosition = HRP.Position
+    local targets = {}
+    local cameraPosition = Camera.CFrame.Position
     
     for _, player in pairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character then
@@ -116,46 +121,40 @@ local function GetAllTargets()
                 local character = player.Character
                 local humanoid = character:FindFirstChild("Humanoid")
                 local targetPart = character:FindFirstChild(States.TargetPart)
-                local targetHRP = character:FindFirstChild("HumanoidRootPart")
                 
-                if humanoid and humanoid.Health > 0 and targetPart and targetHRP then
+                if humanoid and humanoid.Health > 0 and targetPart then
                     local targetPosition = targetPart.Position
-                    local distance = (myPosition - targetHRP.Position).Magnitude
+                    local distance = (cameraPosition - targetPosition).Magnitude
                     
-                    -- Wall Check
-                    if WallCheck(Camera.CFrame.Position, targetPosition) then
-                        table.insert(AllTargets, {
-                            Player = player,
-                            Character = character,
-                            Part = targetPart,
-                            HRP = targetHRP,
-                            Position = targetPosition,
-                            Distance = distance,
-                            Humanoid = humanoid,
-                            Health = humanoid.Health
-                        })
-                    end
+                    table.insert(targets, {
+                        Player = player,
+                        Character = character,
+                        Part = targetPart,
+                        Position = targetPosition,
+                        Distance = distance,
+                        Humanoid = humanoid
+                    })
                 end
             end)
         end
     end
     
-    -- Sort by distance (closest first)
-    table.sort(AllTargets, function(a, b)
+    -- Sort by distance (近い順)
+    table.sort(targets, function(a, b)
         return a.Distance < b.Distance
     end)
     
-    return AllTargets
+    return targets
 end
 
--- Get Nearest Target (360° Detection)
+-- Get Nearest Target Function (360度対応)
 local function GetNearestTarget()
-    GetAllTargets()
+    local targets = GetAllTargets()
     
-    if #AllTargets > 0 then
-        States.CurrentTarget = AllTargets[1] -- Closest target
-        States.TargetDistance = AllTargets[1].Distance
-        return AllTargets[1]
+    if #targets > 0 then
+        States.CurrentTarget = targets[1]
+        States.TargetDistance = targets[1].Distance
+        return targets[1]
     end
     
     States.CurrentTarget = nil
@@ -163,7 +162,7 @@ local function GetNearestTarget()
     return nil
 end
 
--- ESP Creation Function - Enhanced
+-- ESP Creation Function
 local function CreateESP(player)
     if ESPObjects[player] then return end
     
@@ -175,7 +174,6 @@ local function CreateESP(player)
             highlight.Adornee = player.Character
             highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
             
-            -- Red fill, Yellow outline
             highlight.FillColor = Color3.fromRGB(255, 0, 0)
             highlight.OutlineColor = Color3.fromRGB(255, 255, 0)
             highlight.FillTransparency = 0.5
@@ -183,16 +181,15 @@ local function CreateESP(player)
             
             ESPObjects[player] = highlight
             
-            -- Update ESP based on wall check
             local updateConnection = RS.Heartbeat:Connect(function()
                 if highlight and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
                     local canSee = WallCheck(Camera.CFrame.Position, player.Character.HumanoidRootPart.Position)
                     if canSee then
-                        highlight.FillColor = Color3.fromRGB(255, 0, 0) -- Red when visible
-                        highlight.OutlineColor = Color3.fromRGB(0, 255, 0) -- Green outline
+                        highlight.FillColor = Color3.fromRGB(255, 0, 0)
+                        highlight.OutlineColor = Color3.fromRGB(0, 255, 0)
                     else
-                        highlight.FillColor = Color3.fromRGB(255, 100, 0) -- Orange when behind wall
-                        highlight.OutlineColor = Color3.fromRGB(255, 255, 0) -- Yellow outline
+                        highlight.FillColor = Color3.fromRGB(255, 100, 0)
+                        highlight.OutlineColor = Color3.fromRGB(255, 255, 0)
                     end
                 else
                     updateConnection:Disconnect()
@@ -228,7 +225,7 @@ local function UpdateESP()
     end
 end
 
--- Silent Aim Hook - 10x Power
+-- Silent Aim Hook (性能調節付き)
 local oldNamecall
 oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
     local method = getnamecallmethod()
@@ -236,22 +233,15 @@ oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
     
     if States.SilentAim and (method == "FireServer" or method == "InvokeServer") then
         if States.CurrentTarget and States.CurrentTarget.Part then
-            -- Predict target position with 10x lock power
-            local targetVelocity = States.CurrentTarget.HRP.AssemblyVelocity or Vector3.new(0, 0, 0)
-            local predictedPosition = States.CurrentTarget.Position + (targetVelocity * States.LockPower * 0.1)
+            local strength = States.SilentAimStrength / 100
+            local currentPos = args[1]
+            local targetPos = States.CurrentTarget.Position
             
-            -- Modify shooting direction to predicted target
-            if typeof(args[1]) == "Vector3" then
-                args[1] = predictedPosition
+            -- Lerp between current and target based on strength
+            if typeof(currentPos) == "Vector3" then
+                args[1] = currentPos:Lerp(targetPos, strength)
             elseif typeof(args[2]) == "Vector3" then
-                args[2] = predictedPosition
-            end
-            
-            -- Also modify CFrame if present
-            for i, arg in ipairs(args) do
-                if typeof(arg) == "CFrame" then
-                    args[i] = CFrame.new(arg.Position, predictedPosition)
-                end
+                args[2] = args[2]:Lerp(targetPos, strength)
             end
         end
     end
@@ -259,155 +249,165 @@ oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
     return oldNamecall(self, unpack(args))
 end)
 
--- Auto Aim Function (Camera Lock) - 10x Power
+-- Auto Aim Function (性能調節付き)
 local function AutoAim()
     if States.AutoAim and States.CurrentTarget and States.CurrentTarget.Part then
         SafeCall(function()
+            local strength = States.AutoAimStrength / 100
             local targetPos = States.CurrentTarget.Position
-            local targetVelocity = States.CurrentTarget.HRP.AssemblyVelocity or Vector3.new(0, 0, 0)
-            local predictedPos = targetPos + (targetVelocity * States.LockPower * 0.05)
-            
-            -- Smooth camera movement with 10x lock strength
             local currentCFrame = Camera.CFrame
-            local targetCFrame = CFrame.new(currentCFrame.Position, predictedPos)
+            local targetCFrame = CFrame.new(currentCFrame.Position, targetPos)
             
-            -- Lerp with lock power multiplier
-            local lerpFactor = 0.1 * States.LockPower
-            Camera.CFrame = currentCFrame:Lerp(targetCFrame, math.min(lerpFactor, 1))
+            -- Lerp camera rotation
+            Camera.CFrame = currentCFrame:Lerp(targetCFrame, strength * 0.3)
         end)
     end
 end
 
--- Head Lock Function (Instant Lock) - 10x Power
+-- Head Lock Function (性能調節付き)
 local function HeadLock()
     if States.HeadLock and States.CurrentTarget and States.CurrentTarget.Part then
         SafeCall(function()
+            local strength = States.HeadLockStrength / 100
             local targetPos = States.CurrentTarget.Position
-            local targetVelocity = States.CurrentTarget.HRP.AssemblyVelocity or Vector3.new(0, 0, 0)
-            local predictedPos = targetPos + (targetVelocity * States.LockPower * 0.1)
+            local currentCFrame = Camera.CFrame
+            local targetCFrame = CFrame.new(currentCFrame.Position, targetPos)
             
-            -- Instant camera snap with prediction
-            Camera.CFrame = CFrame.new(Camera.CFrame.Position, predictedPos)
+            -- Instant lock at full strength, lerp at lower strength
+            if strength >= 0.9 then
+                Camera.CFrame = targetCFrame
+            else
+                Camera.CFrame = currentCFrame:Lerp(targetCFrame, strength)
+            end
         end)
     end
 end
 
--- Auto Shot Function - Enhanced
+-- Auto Shot Function
 local function AutoShot()
     if not States.AutoShot then return end
     if not States.CurrentTarget then return end
     
     SafeCall(function()
-        -- Platform-specific shooting
         if States.Platform == "Mobile" then
             VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
-            task.wait(States.ShotDelay)
+            task.wait(0.01)
             VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
         elseif States.Platform == "Console" then
             VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.ButtonR1, false, game)
-            task.wait(States.ShotDelay)
+            task.wait(0.01)
             VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.ButtonR1, false, game)
         else
-            -- PC
             mouse1press()
-            task.wait(States.ShotDelay)
+            task.wait(0.01)
             mouse1release()
         end
     end)
 end
 
--- Check if Target is Killed
-local function IsTargetKilled(target)
-    if not target or not target.Humanoid then return false end
+-- ========================================
+-- AUTO TP FUNCTIONS
+-- ========================================
+
+-- Get Random Enemy
+local function GetRandomEnemy()
+    local targets = GetAllTargets()
+    if #targets > 0 then
+        return targets[math.random(1, #targets)]
+    end
+    return nil
+end
+
+-- Teleport to Target with Distance
+local function TPToTarget(target, distance)
+    if not target or not target.Character then return end
     
     SafeCall(function()
-        if target.Humanoid.Health <= 0 then
-            return true
-        end
+        local character = LocalPlayer.Character
+        if not character or not character:FindFirstChild("HumanoidRootPart") then return end
         
-        -- Check if health decreased significantly
-        if States.TargetLastHealth and target.Humanoid.Health < States.TargetLastHealth - 50 then
-            States.TargetLastHealth = target.Humanoid.Health
-            if target.Humanoid.Health <= 0 then
-                return true
-            end
-        else
-            States.TargetLastHealth = target.Humanoid.Health
-        end
+        local targetRoot = target.Character:FindFirstChild("HumanoidRootPart")
+        if not targetRoot then return end
+        
+        local targetPos = targetRoot.Position
+        local direction = (character.HumanoidRootPart.Position - targetPos).Unit
+        local tpPosition = targetPos + (direction * distance)
+        
+        character.HumanoidRootPart.CFrame = CFrame.new(tpPosition, targetPos)
     end)
-    
+end
+
+-- Check if target is killed
+local function IsTargetKilled(target)
+    if not target or not target.Character then return true end
+    local humanoid = target.Character:FindFirstChild("Humanoid")
+    if not humanoid or humanoid.Health <= 0 then return true end
     return false
 end
 
--- Auto TP Function - Smart Random TP After Kill
-local function AutoTP()
-    if not States.AutoTP then return end
+-- Auto TP Random Mode (敵を倒したら次へ)
+local function AutoTPRandom()
+    if not States.AutoTP or States.TPMode ~= "Random" then return end
+    
+    -- If no current target or target is dead, get new one
+    if not States.CurrentTPTarget or IsTargetKilled(States.CurrentTPTarget) then
+        States.CurrentTPTarget = GetRandomEnemy()
+        
+        if States.CurrentTPTarget then
+            Rayfield:Notify({
+                Title = "🎯 New TP Target",
+                Content = "Locked on: " .. States.CurrentTPTarget.Player.Name,
+                Duration = 2,
+                Image = 4483362458
+            })
+        end
+    end
+    
+    -- TP to current target with fixed distance
+    if States.CurrentTPTarget then
+        TPToTarget(States.CurrentTPTarget, States.TPDistance)
+    end
+end
+
+-- All Players Fixed Mode (全員を3スタッド前に固定)
+local function AllPlayersFixed()
+    if not States.AllPlayersFixed then return end
     
     SafeCall(function()
-        -- Get all available targets
-        GetAllTargets()
+        local character = LocalPlayer.Character
+        if not character or not character:FindFirstChild("HumanoidRootPart") then return end
         
-        if #AllTargets == 0 then return end
+        local rootPart = character.HumanoidRootPart
+        local forwardDirection = rootPart.CFrame.LookVector
+        local fixedPosition = rootPart.Position + (forwardDirection * States.FixedDistanceAll)
         
-        -- If no current TP target, select random one
-        if not States.CurrentTPTarget or not States.CurrentTPTarget.Character then
-            local randomIndex = math.random(1, #AllTargets)
-            States.CurrentTPTarget = AllTargets[randomIndex]
-            States.TargetLastHealth = States.CurrentTPTarget.Humanoid.Health
-        end
-        
-        -- Check if current target is killed
-        if States.CurrentTPTarget then
-            local targetHumanoid = States.CurrentTPTarget.Character and States.CurrentTPTarget.Character:FindFirstChild("Humanoid")
-            
-            if not targetHumanoid or targetHumanoid.Health <= 0 then
-                -- Target killed! Increment kill count
-                States.KillCount = States.KillCount + 1
-                States.LastKillTime = tick()
+        -- Move all enemies to fixed position
+        for _, player in pairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and player.Character then
+                local enemyRoot = player.Character:FindFirstChild("HumanoidRootPart")
+                local enemyHumanoid = player.Character:FindFirstChild("Humanoid")
                 
-                -- Select new random target
-                task.wait(0.5) -- Small delay before TP
-                GetAllTargets()
-                
-                if #AllTargets > 0 then
-                    local randomIndex = math.random(1, #AllTargets)
-                    States.CurrentTPTarget = AllTargets[randomIndex]
-                    States.TargetLastHealth = States.CurrentTPTarget.Humanoid.Health
-                    
-                    -- TP to new target
-                    if States.CurrentTPTarget and States.CurrentTPTarget.HRP and HRP then
-                        local targetPos = States.CurrentTPTarget.HRP.Position
-                        local offset = Vector3.new(
-                            math.random(-States.TPRange, States.TPRange),
-                            5,
-                            math.random(-States.TPRange, States.TPRange)
-                        )
-                        HRP.CFrame = CFrame.new(targetPos + offset)
-                        
-                        Rayfield:Notify({
-                            Title = "🎯 Kill Confirmed!",
-                            Content = "Kills: " .. States.KillCount .. " | TP to next target!",
-                            Duration = 2,
-                            Image = 4483362458
-                        })
-                    end
+                if enemyRoot and enemyHumanoid and enemyHumanoid.Health > 0 then
+                    enemyRoot.CFrame = CFrame.new(fixedPosition, rootPart.Position)
+                    enemyRoot.Velocity = Vector3.new(0, 0, 0)
+                    enemyRoot.RotVelocity = Vector3.new(0, 0, 0)
                 end
-            else
-                -- Keep tracking current target's health
-                States.TargetLastHealth = targetHumanoid.Health
             end
         end
     end)
 end
 
--- Main Window Creation
+-- ========================================
+-- UI CREATION
+-- ========================================
+
 local Window = Rayfield:CreateWindow({
-    Name = "⚡ Silent Aim Ultra | 360° + 10x Lock " .. (States.Platform == "Mobile" and "📱" or States.Platform == "Console" and "🎮" or "💻"),
-    LoadingTitle = "Loading Ultra Silent Aim...",
-    LoadingSubtitle = "360° Detection + 10x Lock Power | Platform: " .. States.Platform,
+    Name = "⚡ Silent Aim V2 | 360° Aimbot " .. (States.Platform == "Mobile" and "📱" or States.Platform == "Console" and "🎮" or "💻"),
+    LoadingTitle = "Loading Silent Aim V2...",
+    LoadingSubtitle = "Platform: " .. States.Platform,
     ConfigurationSaving = {
         Enabled = true,
-        FolderName = "SilentAimUltra",
+        FolderName = "SilentAimV2",
         FileName = "Settings"
     },
     Discord = {
@@ -420,91 +420,99 @@ local Window = Rayfield:CreateWindow({
 -- 🎯 MAIN AIMBOT TAB
 -- ========================================
 local MainTab = Window:CreateTab("🎯 Aimbot", 4483362458)
-local AimbotSection = MainTab:CreateSection("Core Aimbot Features (Auto-Enabled)")
+local AimbotSection = MainTab:CreateSection("Core Aimbot Features (360°)")
 
--- Silent Aim Toggle (Auto-enabled)
+-- Silent Aim Toggle
 local SilentAimToggle = MainTab:CreateToggle({
-    Name = "Silent Aim (10x Power)",
+    Name = "Silent Aim",
     CurrentValue = true,
     Flag = "SilentAim",
     Callback = function(Value)
         States.SilentAim = Value
         Rayfield:Notify({
             Title = "Silent Aim",
-            Content = Value and "✅ Enabled (10x Power)" or "❌ Disabled",
+            Content = Value and "✅ Enabled (360°)" or "❌ Disabled",
             Duration = 2,
             Image = 4483362458
         })
     end,
 })
 
--- Head Lock Toggle (Auto-enabled)
+-- Silent Aim Strength
+local SilentAimStrength = MainTab:CreateSlider({
+    Name = "Silent Aim Strength",
+    Range = {10, 100},
+    Increment = 1,
+    Suffix = "%",
+    CurrentValue = 100,
+    Flag = "SilentAimStrength",
+    Callback = function(Value)
+        States.SilentAimStrength = Value
+    end,
+})
+
+-- Head Lock Toggle
 local HeadLockToggle = MainTab:CreateToggle({
-    Name = "Head Lock (10x Instant Lock)",
+    Name = "Head Lock (Camera Lock)",
     CurrentValue = true,
     Flag = "HeadLock",
     Callback = function(Value)
         States.HeadLock = Value
         Rayfield:Notify({
             Title = "Head Lock",
-            Content = Value and "✅ Enabled (10x Instant)" or "❌ Disabled",
+            Content = Value and "✅ Enabled" or "❌ Disabled",
             Duration = 2,
             Image = 4483362458
         })
     end,
 })
 
--- Auto Aim Toggle (Auto-enabled)
+-- Head Lock Strength
+local HeadLockStrength = MainTab:CreateSlider({
+    Name = "Head Lock Strength",
+    Range = {10, 100},
+    Increment = 1,
+    Suffix = "%",
+    CurrentValue = 100,
+    Flag = "HeadLockStrength",
+    Callback = function(Value)
+        States.HeadLockStrength = Value
+    end,
+})
+
+-- Auto Aim Toggle
 local AutoAimToggle = MainTab:CreateToggle({
-    Name = "Auto Aim (10x Smooth Lock)",
+    Name = "Auto Aim (Smooth Lock)",
     CurrentValue = true,
     Flag = "AutoAim",
     Callback = function(Value)
         States.AutoAim = Value
         Rayfield:Notify({
             Title = "Auto Aim",
-            Content = Value and "✅ Enabled (10x Smooth)" or "❌ Disabled",
+            Content = Value and "✅ Enabled" or "❌ Disabled",
             Duration = 2,
             Image = 4483362458
         })
     end,
 })
 
--- Lock Power Slider (NEW!)
-local LockPowerSlider = MainTab:CreateSlider({
-    Name = "Lock Power Multiplier",
-    Range = {1, 20},
+-- Auto Aim Strength
+local AutoAimStrength = MainTab:CreateSlider({
+    Name = "Auto Aim Strength",
+    Range = {10, 100},
     Increment = 1,
-    Suffix = "x",
-    CurrentValue = 10,
-    Flag = "LockPower",
+    Suffix = "%",
+    CurrentValue = 100,
+    Flag = "AutoAimStrength",
     Callback = function(Value)
-        States.LockPower = Value
-        Rayfield:Notify({
-            Title = "Lock Power",
-            Content = "Set to " .. Value .. "x",
-            Duration = 1,
-            Image = 4483362458
-        })
-    end,
-})
-
-local AimbotSection2 = MainTab:CreateSection("Advanced Settings")
-
--- Wall Check Toggle
-local WallCheckToggle = MainTab:CreateToggle({
-    Name = "Wall Check (Visible Only)",
-    CurrentValue = true,
-    Flag = "WallCheck",
-    Callback = function(Value)
-        States.WallCheck = Value
+        States.AutoAimStrength = Value
     end,
 })
 
 -- Target Part Selection
 local TargetPartDropdown = MainTab:CreateDropdown({
     Name = "Target Part",
-    Options = {"Head", "UpperTorso", "HumanoidRootPart", "LowerTorso"},
+    Options = {"Head", "UpperTorso", "HumanoidRootPart"},
     CurrentOption = "Head",
     Flag = "TargetPart",
     Callback = function(Option)
@@ -512,17 +520,12 @@ local TargetPartDropdown = MainTab:CreateDropdown({
     end,
 })
 
--- Detection Info
-local DetectionLabel = MainTab:CreateLabel("Detection: 360° (Front + Back + Sides)")
-local TargetingLabel = MainTab:CreateLabel("Targeting: Closest Enemy First")
-
 -- ========================================
--- 👁️ ESP TAB (Auto-enabled)
+-- 👁️ ESP TAB
 -- ========================================
 local ESPTab = Window:CreateTab("👁️ ESP", 4483362458)
-local ESPSection = ESPTab:CreateSection("ESP Features (Auto-Enabled)")
+local ESPSection = ESPTab:CreateSection("ESP Features")
 
--- ESP Toggle (Auto-enabled)
 local ESPToggle = ESPTab:CreateToggle({
     Name = "ESP (Player Highlight)",
     CurrentValue = true,
@@ -532,17 +535,12 @@ local ESPToggle = ESPTab:CreateToggle({
         UpdateESP()
         Rayfield:Notify({
             Title = "ESP",
-            Content = Value and "✅ Enabled (Red=Visible, Orange=Wall)" or "❌ Disabled",
+            Content = Value and "✅ Enabled" or "❌ Disabled",
             Duration = 3,
             Image = 4483362458
         })
     end,
 })
-
-local ESPInfoLabel = ESPTab:CreateLabel("Red Fill = Enemy Visible")
-local ESPInfoLabel2 = ESPTab:CreateLabel("Orange Fill = Enemy Behind Wall")
-local ESPInfoLabel3 = ESPTab:CreateLabel("Green Outline = Can See")
-local ESPInfoLabel4 = ESPTab:CreateLabel("Yellow Outline = Behind Wall")
 
 -- ========================================
 -- 🔫 AUTO SHOT TAB
@@ -550,7 +548,6 @@ local ESPInfoLabel4 = ESPTab:CreateLabel("Yellow Outline = Behind Wall")
 local AutoShotTab = Window:CreateTab("🔫 Auto Shot", 4483362458)
 local AutoShotSection = AutoShotTab:CreateSection("Automatic Shooting")
 
--- Auto Shot Toggle
 local AutoShotToggle = AutoShotTab:CreateToggle({
     Name = "Auto Shot (When Locked)",
     CurrentValue = false,
@@ -567,7 +564,7 @@ local AutoShotToggle = AutoShotTab:CreateToggle({
             
             Rayfield:Notify({
                 Title = "Auto Shot",
-                Content = "✅ Enabled - Shooting when locked",
+                Content = "✅ Enabled",
                 Duration = 3,
                 Image = 4483362458
             })
@@ -576,64 +573,43 @@ local AutoShotToggle = AutoShotTab:CreateToggle({
                 Connections["AutoShot"]:Disconnect()
                 Connections["AutoShot"] = nil
             end
-            
-            Rayfield:Notify({
-                Title = "Auto Shot",
-                Content = "❌ Disabled",
-                Duration = 2,
-                Image = 4483362458
-            })
         end
     end,
 })
 
--- Shot Delay Slider
-local ShotDelaySlider = AutoShotTab:CreateSlider({
-    Name = "Shot Delay",
-    Range = {0.01, 1},
-    Increment = 0.01,
-    Suffix = "s",
-    CurrentValue = 0.01,
-    Flag = "ShotDelay",
-    Callback = function(Value)
-        States.ShotDelay = Value
-    end,
-})
-
-local AutoShotInfoLabel = AutoShotTab:CreateLabel("Platform: " .. States.Platform)
-if States.Platform == "Mobile" then
-    AutoShotTab:CreateLabel("Fire Button: Touch Screen")
-elseif States.Platform == "Console" then
-    AutoShotTab:CreateLabel("Fire Button: R1")
-else
-    AutoShotTab:CreateLabel("Fire Button: Mouse 1")
-end
-
 -- ========================================
--- 🌀 AUTO TP TAB (NEW!)
+-- 🌀 AUTO TP TAB
 -- ========================================
 local AutoTPTab = Window:CreateTab("🌀 Auto TP", 4483362458)
-local AutoTPSection = AutoTPTab:CreateSection("Smart Random Teleport")
+local TPSection = AutoTPTab:CreateSection("Auto Teleport Features")
 
--- Auto TP Toggle
+-- Auto TP Random Mode
 local AutoTPToggle = AutoTPTab:CreateToggle({
-    Name = "Auto TP (After Kill)",
+    Name = "Auto TP (Random + Kill Loop)",
     CurrentValue = false,
     Flag = "AutoTP",
     Callback = function(Value)
         States.AutoTP = Value
+        States.TPMode = "Random"
         
         if Value then
-            States.KillCount = 0
-            States.CurrentTPTarget = nil
+            States.CurrentTPTarget = GetRandomEnemy()
+            
+            Connections["AutoTPRandom"] = RS.Heartbeat:Connect(function()
+                AutoTPRandom()
+            end)
             
             Rayfield:Notify({
-                Title = "Auto TP",
-                Content = "✅ Enabled - Will TP after each kill!",
-                Duration = 3,
+                Title = "Auto TP Random",
+                Content = "✅ TP to random enemy, new target after kill",
+                Duration = 4,
                 Image = 4483362458
             })
         else
+            if Connections["AutoTPRandom"] then
+                Connections["AutoTPRandom"]:Disconnect()
+                Connections["AutoTPRandom"] = nil
+            end
             States.CurrentTPTarget = nil
             
             Rayfield:Notify({
@@ -646,51 +622,97 @@ local AutoTPToggle = AutoTPTab:CreateToggle({
     end,
 })
 
--- TP Range Slider
-local TPRangeSlider = AutoTPTab:CreateSlider({
-    Name = "TP Distance from Target",
-    Range = {10, 100},
-    Increment = 5,
-    Suffix = "studs",
-    CurrentValue = 50,
-    Flag = "TPRange",
+-- TP Distance Slider (0-25 studs)
+local TPDistanceSlider = AutoTPTab:CreateSlider({
+    Name = "TP Distance (Studs)",
+    Range = {0, 25},
+    Increment = 0.5,
+    Suffix = " studs",
+    CurrentValue = 10,
+    Flag = "TPDistance",
     Callback = function(Value)
-        States.TPRange = Value
+        States.TPDistance = Value
     end,
 })
 
-local AutoTPSection2 = AutoTPTab:CreateSection("How It Works")
-local TPInfoLabel1 = AutoTPTab:CreateLabel("1. Randomly selects an enemy")
-local TPInfoLabel2 = AutoTPTab:CreateLabel("2. Locks onto them with aimbot")
-local TPInfoLabel3 = AutoTPTab:CreateLabel("3. When killed, TPs to next random enemy")
-local TPInfoLabel4 = AutoTPTab:CreateLabel("4. Loop continues infinitely")
+local TPInfoLabel = AutoTPTab:CreateLabel("TP follows enemy movement")
+local TPInfoLabel2 = AutoTPTab:CreateLabel("Auto switches to new enemy after kill")
 
-local KillCountLabel = AutoTPTab:CreateLabel("Kills This Session: 0")
+-- ========================================
+-- 🎭 ALL PLAYERS FIXED TAB
+-- ========================================
+local FixedTab = Window:CreateTab("🎭 Fixed Mode", 4483362458)
+local FixedSection = FixedTab:CreateSection("All Players Fixed Position")
+
+-- All Players Fixed Toggle
+local AllFixedToggle = FixedTab:CreateToggle({
+    Name = "Fix All Players In Front",
+    CurrentValue = false,
+    Flag = "AllPlayersFixed",
+    Callback = function(Value)
+        States.AllPlayersFixed = Value
+        
+        if Value then
+            Connections["AllPlayersFixed"] = RS.Heartbeat:Connect(function()
+                AllPlayersFixed()
+            end)
+            
+            Rayfield:Notify({
+                Title = "Fixed Mode",
+                Content = "✅ All enemies fixed " .. States.FixedDistanceAll .. " studs in front",
+                Duration = 4,
+                Image = 4483362458
+            })
+        else
+            if Connections["AllPlayersFixed"] then
+                Connections["AllPlayersFixed"]:Disconnect()
+                Connections["AllPlayersFixed"] = nil
+            end
+            
+            Rayfield:Notify({
+                Title = "Fixed Mode",
+                Content = "❌ Disabled",
+                Duration = 2,
+                Image = 4483362458
+            })
+        end
+    end,
+})
+
+-- Fixed Distance Slider
+local FixedDistanceSlider = FixedTab:CreateSlider({
+    Name = "Fixed Distance",
+    Range = {1, 10},
+    Increment = 0.5,
+    Suffix = " studs",
+    CurrentValue = 3,
+    Flag = "FixedDistanceAll",
+    Callback = function(Value)
+        States.FixedDistanceAll = Value
+    end,
+})
+
+local FixedInfoLabel = FixedTab:CreateLabel("All enemies stay in front of you")
+local FixedInfoLabel2 = FixedTab:CreateLabel("Even after respawn, they stay fixed")
 
 -- ========================================
 -- ⚙️ SETTINGS TAB
 -- ========================================
 local SettingsTab = Window:CreateTab("⚙️ Settings", 4483362458)
-local SettingsSection = SettingsTab:CreateSection("Script Information")
+local SettingsSection = SettingsTab:CreateSection("Script Settings")
 
-local InfoLabel1 = SettingsTab:CreateLabel("Silent Aim Status: Active")
+local InfoLabel1 = SettingsTab:CreateLabel("Silent Aim Status: Active (360°)")
 local InfoLabel2 = SettingsTab:CreateLabel("Platform: " .. States.Platform)
 local InfoLabel3 = SettingsTab:CreateLabel("Current Target: None")
-local InfoLabel4 = SettingsTab:CreateLabel("Target Distance: ∞")
-local InfoLabel5 = SettingsTab:CreateLabel("Lock Power: 10x")
-local InfoLabel6 = SettingsTab:CreateLabel("Detection: 360°")
+local InfoLabel4 = SettingsTab:CreateLabel("TP Target: None")
 
 -- Update Info Labels
 Connections["InfoUpdate"] = RS.Heartbeat:Connect(function()
     SafeCall(function()
         InfoLabel3:Set("Current Target: " .. (States.CurrentTarget and States.CurrentTarget.Player.Name or "None"))
-        InfoLabel4:Set("Target Distance: " .. (States.CurrentTarget and math.floor(States.TargetDistance) .. " studs" or "∞"))
-        InfoLabel5:Set("Lock Power: " .. States.LockPower .. "x")
-        KillCountLabel:Set("Kills This Session: " .. States.KillCount)
+        InfoLabel4:Set("TP Target: " .. (States.CurrentTPTarget and States.CurrentTPTarget.Player.Name or "None"))
     end)
 end)
-
-local SettingsSection2 = SettingsTab:CreateSection("Script Controls")
 
 local UnloadButton = SettingsTab:CreateButton({
     Name = "🔌 Unload Script",
@@ -702,25 +724,17 @@ local UnloadButton = SettingsTab:CreateButton({
 })
 
 -- ========================================
--- MAIN AIMBOT LOOP (360° Detection)
+-- MAIN AIMBOT LOOP
 -- ========================================
 Connections["MainAimbot"] = RS.Heartbeat:Connect(function()
-    -- Get nearest target (360° including behind)
     GetNearestTarget()
     
-    -- Apply Head Lock (10x power)
     if States.HeadLock then
         HeadLock()
     end
     
-    -- Apply Auto Aim (10x power)
     if States.AutoAim then
         AutoAim()
-    end
-    
-    -- Auto TP Logic
-    if States.AutoTP then
-        AutoTP()
     end
 end)
 
@@ -733,7 +747,7 @@ Connections["ESPUpdate"] = RS.Heartbeat:Connect(function()
     end
 end)
 
--- Player Added/Removed Handlers
+-- Player Handlers
 Players.PlayerAdded:Connect(function(player)
     if States.ESP then
         player.CharacterAdded:Connect(function()
@@ -747,38 +761,30 @@ Players.PlayerRemoving:Connect(function(player)
     RemoveESP(player)
 end)
 
--- Character Re-added Handler
-LocalPlayer.CharacterAdded:Connect(function(newChar)
-    Character = newChar
-    HRP = newChar:WaitForChild("HumanoidRootPart")
-    Humanoid = newChar:WaitForChild("Humanoid")
-end)
-
 -- ========================================
--- AUTO-ENABLE FEATURES ON LOAD
+-- AUTO-ENABLE FEATURES
 -- ========================================
 task.wait(0.5)
 
--- Auto-enable all main features
 States.SilentAim = true
 States.HeadLock = true
 States.AutoAim = true
 States.ESP = true
 
--- Update ESP immediately
 UpdateESP()
 
 -- ========================================
 -- INITIAL NOTIFICATION
 -- ========================================
 Rayfield:Notify({
-    Title = "⚡ Silent Aim Ultra Loaded",
-    Content = "✅ All features auto-enabled!\n🎯 Silent Aim: ON (10x)\n🔒 Head Lock: ON (10x)\n🎯 Auto Aim: ON (10x)\n👁️ ESP: ON\n🌐 Detection: 360°\nPlatform: " .. States.Platform,
+    Title = "⚡ Silent Aim V2 Loaded",
+    Content = "✅ All features ready!\n🎯 360° Detection\n📊 Performance: 10-100%\n🌀 Auto TP: Random + Kill Loop\n🎭 Fixed Mode: Available\nPlatform: " .. States.Platform,
     Duration = 10,
     Image = 4483362458
 })
 
-print("✅ Silent Aim Ultra - Advanced Aimbot System Loaded")
-print("🎯 Features: 360° Detection, 10x Lock Power, Smart Auto TP")
+print("✅ Silent Aim V2 - Advanced Aimbot System Loaded")
+print("🎯 360° Detection | Performance Adjustable")
+print("🌀 Auto TP: Random + Follow | Fixed Mode")
 print("📱 Platform: " .. States.Platform)
 print("🔫 Ready to dominate!")
